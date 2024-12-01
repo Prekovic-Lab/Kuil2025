@@ -1,0 +1,1431 @@
+---
+title: "IR CosMx"
+author: "Roan van Scheppingen"
+output:
+  html_document:
+    toc: true
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# General information
+The following script was used to analyse the Spatial Transcriptomics data generated using the CosMx 1000-gene Mouse Neuroscience panel for the manuscript of Kuil *et al* (2025). 
+
+The code was written by Roan van Scheppingen (https://orcid.org/0000-0002-9099-5042). 
+
+# Opening the files
+```{r Opening, eval = FALSE}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(SeuratWrappers)
+library(batchelor)
+library(anndata)
+library(jsonlite)
+library(readr)
+library(DESeq2)
+library(VennDiagram)
+library(InSituType)
+library(reshape2)
+library(data.table)
+library(Matrix)
+library(RANN)
+library(forcats)
+library(sf)
+library(tidyr)
+library(RColorBrewer)
+library(fgsea)
+library(scrubletR)
+library(spatstat)
+library(pheatmap)
+library(scran)
+library(reticulate)
+library(ggrepel)
+library(edgeR)
+library(CellChat)
+library(circlize)
+library(GSVA)
+library(ggpubr)
+```
+
+# Proseg reanalysis of transcripts
+https://github.com/dcjones/proseg
+```{Rust Proseg reanalysis of transcripts}
+# Original data contained multiple experiments
+# Subset to get the irradiated experiments
+selected_fovs <- c(1:79, 107:130, 149:175)
+
+# Filter the flatfiles from Nanostring 
+filtered_data <- subset(MsBrainTMA_tx_file, !fov %in% selected_fovs)
+write.csv(filtered_data, "IR_subset_Proseg1_6.csv")
+
+#(Rust is installed including proseg (v1.06))
+proseg GR_subset_Proseg1_6.csv.gz --cosmx --output-maxpost-counts counts.csv.gz --nthreads 16 --voxel-layers 15 --use-cell-initialization
+```
+
+# Making Seurat and adding meta.data to the files
+```{r meta.data fov, eval = FALSE}
+#Make the Seurat by first loading the counts and the cell metadata output from Proseg
+#Remove the Systemcontrols from counts
+cols_to_keep <- !grepl("SystemControl", names(counts))
+# Subset the dataframe to keep only the desired columns
+counts <- counts[, cols_to_keep]
+tcounts <- transpose(counts)
+Seurat <- CreateSeuratObject(tcounts, assay = "RNA", meta.data = cell_metadata)
+rownames(Seurat) <- colnames(counts)
+
+#Assign TMA numbers to the Seurat
+Seurat$TMA <- 0
+Seurat$TMA[Seurat$fov %in% 1:14] <- 1
+Seurat$TMA[Seurat$fov %in% 15:28] <- 2 
+Seurat$TMA[Seurat$fov %in% 29:43] <- 3 
+Seurat$TMA[Seurat$fov %in% 44:57] <- 4 
+Seurat$TMA[Seurat$fov %in% 58:70] <- 5 
+Seurat$TMA[Seurat$fov %in% 71:79] <- 6 
+Seurat$TMA[Seurat$fov %in% 80:93] <- 7 
+Seurat$TMA[Seurat$fov %in% 94:106] <- 8 
+Seurat$TMA[Seurat$fov %in% 107:117] <- 9 
+Seurat$TMA[Seurat$fov %in% 118:130] <- 10 
+Seurat$TMA[Seurat$fov %in% 131:138] <- 11 
+Seurat$TMA[Seurat$fov %in% 139:148] <- 12 
+Seurat$TMA[Seurat$fov %in% 149:161] <- 13 
+Seurat$TMA[Seurat$fov %in% 162:175] <- 14 
+Seurat$TMA[Seurat$fov %in% 176:186] <- 15 
+Seurat$TMA[Seurat$fov %in% 187:200] <- 16 
+Seurat$TMA[Seurat$fov %in% 201:213] <- 17 
+Seurat$TMA[Seurat$fov %in% 214:226] <- 18 
+Seurat$TMA[Seurat$fov %in% 227:235] <- 19 
+Seurat$TMA[Seurat$fov %in% 236:249] <- 20 
+Seurat$TMA[Seurat$fov %in% 250:260] <- 21 
+Seurat$TMA[Seurat$fov %in% 261:270] <- 22 
+Seurat$TMA[Seurat$fov %in% 271:278] <- 23 
+Seurat$TMA[Seurat$fov %in% 279:290] <- 24 
+Seurat$TMA[Seurat$fov %in% 291:304] <- 25 
+Seurat$TMA[Seurat$fov %in% 305:314] <- 26 
+Seurat$TMA[Seurat$fov %in% 315:324] <- 27 
+Seurat$TMA[Seurat$fov %in% 325:334] <- 28
+```
+
+### Quality control in all cells
+```{r Quality control overall, eval = FALSE}
+# Plot a histogram of the mean counts of RNA per cell
+mean_count = mean(Seurat$nCount_RNA)
+hist(Seurat$nCount_RNA, breaks = 100, xlim = c(0,1000), 
+     main = "nCounts_RNA per cell", xlab = "RNA Counts")
+abline(v = mean_count, col = "red")
+text(x = mean_count + 110, y = par("usr")[4]-2000, 
+     labels = paste("Mean =", round(mean_count, 2)), col = "black")
+
+# Plot a histogram of the mean features of RNA per cell
+mean_Feature = mean(Seurat$nFeature_RNA)
+hist(Seurat$nFeature_RNA, breaks = 100, xlim = c(0,400), 
+     main = "nFeatures per cell", xlab = "Feature counts")
+abline(v = mean_Feature, col = "red")
+text(x = mean_Feature + 110, y = par("usr")[4]-2000, 
+     labels = paste("Mean =", round(mean_Feature, 2)), col = "black")
+
+# Plot a featurescatter
+FeatureScatter(Seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", 
+               cols = "black", pt.size = 0.1)
+
+# Cell count per FOV
+cells_per_fov <- table(Seurat@meta.data$fov)
+total_fovs <- length(cells_per_fov)
+
+# Calculate the total sum of counts
+total_counts <- sum(cells_per_fov)
+# Calculate the mean of counts per FOV
+mean_count_per_fov <- total_counts / total_fovs
+
+# Scatterplot of cells per fov 
+plot(cells_per_fov, type = "p", pch = 20, col = "black", 
+     main = "Cell Counts per FOV", xlab = "FOV", ylab = "Cell Count")
+
+# Histogram of the amount of cells per fov
+hist(cells_per_fov, breaks = 100, xlab = "Cells per FOV", 
+     main = "Histogram cells/FOV")
+abline(v = mean_count_per_fov, col = "red")
+text(x = 340, y = par("usr")[4]-5, 
+     labels = paste("Mean =", round(mean_count_per_fov, 2)), col = "black")
+
+
+
+#Counts per gene
+Genes <- rownames(Seurat)
+counts_per_gene <- data.frame()
+
+for (gene_name in Genes) {
+  # Get counts per cell for the current gene
+  gene_counts <- GetAssayData(object = Seurat, slot = "counts")[gene_name, ]
+  # Calculate the sum of counts per cell for the current gene
+  sum_counts <- sum(gene_counts)
+  # Store the result in the data frame
+  counts_per_gene <- rbind(counts_per_gene, data.frame(Gene = gene_name, Sum_Counts = sum_counts))
+}
+```
+
+### Filtering and further meta.data
+```{r Filtering, eval = FALSE}
+# IR SET
+## 11 and 12 are left out due to low cell numbers
+Set <- subset(Seurat, TMA %in% c(7,8,15,16,17,18,19,20,21,22,23,24,25,26,27,28))
+
+#Define negative probe mean
+Negatives <- rownames(Set)
+Negatives <- Negatives[grepl("Negative", Negatives)]
+NegativeProbes <- FetchData(object = Set, vars = Negatives)
+MeanNegativeProbes <- rowMeans(NegativeProbes)
+mean_negatives = mean(MeanNegativeProbes)
+
+#Histogram of negative counts
+hist(MeanNegativeProbes, breaks = 100, xlim = c(0,0.4))
+abline(v = mean_negatives, col = "red")
+text(x = 0.1 , y = par("usr")[4]-4000, labels = paste("Mean ~", round(mean_negatives, 2)), col = "black")
+
+#plot of counts over mean of negative marker.
+df = data.frame(neg = MeanNegativeProbes, counts = Set@meta.data$nCount_RNA, feature = Set@meta.data$nFeature_RNA)
+df = data.frame(neg = MeanNegativeProbes, counts = Set@meta.data$nCount_RNA, feature = Set@meta.data$nFeature_RNA)
+ggplot(df, aes(x = counts, y = neg)) + geom_point() + theme_minimal()
+
+#Add MeanNegativeProbes to data and subset based on this and feature count. 
+Set$MeanNegativeProbes = MeanNegativeProbes
+Subset <- subset(Set, subset = MeanNegativeProbes <= 0.1 & nFeature_RNA >= 20)
+
+#Adding condition to the meta.data
+Subset$TMAtext <- 0
+Subset$core <- 0
+Subset$brainregion <- 0 
+tma_lookup <- c(7,8,11,12,15,16,17,18,19,20,21,22,23,24,25,26,27,28)
+tma_labels <- c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R")
+tma_core <- c(146,144,146,144,146,144,150,149,145,143,150,149,145,143,150,149,145,143)
+tma_rad <-c("n","n","n","n","n","n","y","y","n","y","y","y","n","y","y","y","n","y")
+tma_region <- c("T","T","C","C","T","H","C","C","C","T","T","T","T","H","H","H","H","C")
+
+# Map TMA values to corresponding labels using the lookup table
+Subset$TMAtext <- tma_labels[match(Subset$TMA, tma_lookup)]
+Subset$core <- tma_core[match(Subset$TMA, tma_lookup)]
+Subset$Condition <- tma_rad[match(Subset$TMA, tma_lookup)]
+Subset$brainregion <- tma_region[match(Subset$TMA, tma_lookup)]
+```
+
+# Scrublet
+```{r Scrublet, eval = FALSE}
+use_virtualenv("/Users/roanvanscheppingen/.virtualenvs/r-reticulate", required = TRUE)
+scrublet <- import("scrublet")
+
+counts_matrix <- as.matrix(GetAssayData(Subset, slot = "counts"))
+counts_matrix <- t(counts_matrix)
+# Convert the count matrix to Python-compatible format
+counts_matrix_py <- r_to_py(counts_matrix)
+
+# Initialize Scrublet and run it
+scr <- scrublet$Scrublet(counts_matrix_py, expected_doublet_rate = 0.25)
+doublet_scores <- scr$scrub_doublets()
+
+scores <- doublet_scores[[1]]
+scores_numeric <- as.numeric(scores)
+scores <- as.data.frame(doublet_scores)
+rownames(scores) <- Cells(Subset)
+
+# Add the first column of 'scores' to 'Subset' as metadata
+Subset$doubletscore <- scores[, 1]
+
+doublet_scores <- as.numeric(Subset$doubletscore)
+#Calculate the cutoff for the top 3% of cells
+cutoff <- quantile(doublet_scores, probs = 0.97)
+
+#Filter out cells with doublet scores above the cutoff
+Subset <- Subset[, doublet_scores <= cutoff]
+```
+
+# Smoothing Maher 2023
+https://www.biorxiv.org/content/10.1101/2023.06.30.547258v1
+```{r Smoothing, eval = FALSE}
+# !!! Run by using spin <- maher_spin(Seurat) otherwise it will not put out the Seurat !!!
+maher_smooth <- function(seur_obj,nn_graph,n_samples=NULL,n_nbrs=30,assay="RNA",
+                         layer="counts"){
+    print("Converting data to data.table")
+    #Grab expression data
+    mat = GetAssayData(seur_obj, layer = "counts")
+    #Dense matrix has better column access...
+    mat = as.data.table(mat)
+    print("Conversion complete.")
+    if(is.null(n_samples)){
+        n_samples = round(n_nbrs/3,0)
+    }
+    #Sample neighbors for each cell
+    print("Sampling neighbors")
+    sampled = apply(nn_graph,1,function(x) sample(x,n_samples))
+    #Turn into list
+    sampled = as.list(as.data.frame(sampled))
+    #Calculate new representation. Can take a while, using DT for it now. <1 min for 55k spots
+    new_mat = lapply(sampled, function(x) rowMeans(mat[,..x]))
+    new_mat = do.call(cbind, new_mat)
+    ##Hashed it because otherwise it gives a list of 2 Seurats 
+    #return(new_mat)
+}
+
+
+maher_get_neighbors <- function(seur_obj, n_nbrs) {
+    # Initialize an empty list to store nearest neighbor indices for each TMA
+    nns_list <- list()
+
+    # Loop over each unique TMA in the metadata
+    for (tma_id in unique(seur_obj@meta.data$TMA)) {
+        # Filter the Seurat object for the current TMA
+        seur_obj_subset <- subset(seur_obj, subset = TMA == tma_id)
+
+        # Extract coordinates for the current TMA
+        coords_matrix <- data.frame(x = seur_obj_subset$centroid_x, y = seur_obj_subset$centroid_y)
+
+        # Perform nearest neighbor search for the current TMA
+        nns_x <- nn2(coords_matrix, k = n_nbrs)$nn.idx
+
+        # Replace indices with row names
+        rownames(nns_x) <- rownames(seur_obj_subset@meta.data)
+
+        # Sort the nearest neighbor matrix based on row names
+        nns_x <- nns_x[order(rownames(nns_x)), ]
+
+        # Store the nearest neighbor indices for the current TMA in the list
+        nns_list[[tma_id]] <- nns_x
+    }
+
+    # Merge all lists into a single matrix
+    nns <- do.call(rbind, nns_list)
+
+    # Return the merged nearest neighbor matrix
+    #return(nns)
+}
+
+maher_spin <- function(seur_obj,n_nbrs = 30, n_samples=NULL,n_pcs=30,
+                       random_state= 0,assay="Spatial",layer="counts",
+                      resolution=1){
+    set.seed(random_state)
+    print("Computing nearest neighbors")
+    nns = maher_get_neighbors(seur_obj,n_nbrs = n_nbrs)
+    print("Computing Smoothed representations")
+    new_repr = maher_smooth(seur_obj,nns,n_nbrs=n_nbrs,assay = assay,layer=layer,n_samples=n_samples)
+    #Add new representation as Assay
+    rownames(new_repr) = rownames(seur_obj)
+    print("Normalizing")
+    #Sparsify
+    new_repr = as.sparse(new_repr)
+    new_repr <- new_repr
+    seur_obj_spin = CreateSeuratObject(counts = new_repr, meta.data = seur_obj@meta.data)
+    print("create Seurat done")
+    
+    #Start integration 
+    seur_obj_spin[["RNA"]] <- split(seur_obj_spin[["RNA"]], f = seur_obj_spin$TMA)
+    seur_obj_spin <- NormalizeData(seur_obj_spin, normalization.method = "RC", scale.factor = 1e6)
+    print("Normalize done")
+    print("FindVariableFeatures")
+    seur_obj_spin <- FindVariableFeatures(seur_obj_spin, selection.method = "vst", nfeatures = 100)
+    negative_probes <- grep("Negative", VariableFeatures(seur_obj_spin), value = TRUE)
+    filtered_features <- setdiff(VariableFeatures(seur_obj_spin), negative_probes)
+
+    # Set the filtered VariableFeatures
+    VariableFeatures(seur_obj_spin) <- filtered_features
+
+    print("FindVariableFeatures done")
+    print("Scale data")
+    seur_obj_spin = ScaleData(seur_obj_spin, vars.to.regress = c("nCount_RNA"))
+    print("PCA")
+    seur_obj_spin <- RunPCA(seur_obj_spin,verbose=F, approx = TRUE) 
+    print("Integration")
+    seur_obj_spin <- IntegrateLayers(object = seur_obj_spin, method = RPCAIntegration, verbose = F)
+    print("SNN, UMAP, Louvain")
+    seur_obj_spin <- FindNeighbors(seur_obj_spin,dims=1:n_pcs,verbose=F)
+    seur_obj_spin <- RunUMAP(seur_obj_spin,
+                        dims=1:n_pcs,verbose=F)
+    seur_obj_spin <- FindClusters(seur_obj_spin,resolution=resolution,verbose=F)
+    domains = seur_obj_spin$seurat_clusters
+    names(domains) = NULL
+    seur_obj$SPINDomain = domains
+    return(seur_obj_spin)
+}
+
+spin <- maher_spin(Subset)
+
+# Add this to your initial Seurat
+colnames(spin@meta.data)[colnames(spin@meta.data) == "seurat_clusters"] <- "spin"
+#Add spin to meta.data of original
+cell_ids <- colnames(GetAssayData(object = Subset, slot = "counts"))
+matched_values <- spin$spin[cell_ids]
+# Assign matched values to a new metadata column in Subset
+Subset@meta.data$SPIN <- matched_values
+```
+
+# Integration
+```{r NormalizeData, eval = FALSE}
+Subset[["RNA"]] <- split(Subset[["RNA"]], f = Subset$TMA)
+Subset <- NormalizeData(Subset, normalization.method = "RC", scale.factor = 1e6)
+#The number of variable features should be a fraction of the total available features, depending on the 1K, 6K or WT panel 
+Subset <- FindVariableFeatures(Subset, selection.method = "vst", nfeatures = 70, layer = "data")
+
+toppers <- head(VariableFeatures(Subset), 10)
+all.genes <- rownames(Subset)
+
+Subset <- ScaleData(Subset, featuers = all.genes, vars.to.regress = c("nCount_RNA"))
+#The PCA is run for rPCA integration! 
+
+negative_probes <- grep("Negative", VariableFeatures(Subset), value = TRUE)
+filtered_features <- setdiff(VariableFeatures(Subset), negative_probes)
+# Set the filtered VariableFeatures
+VariableFeatures(Subset) <- filtered_features
+Subset <- RunPCA(Subset, features = VariableFeatures(object = Subset), approx = TRUE)
+ElbowPlot(Subset)
+
+#Integration
+Subset <- IntegrateLayers(
+  object = Subset,
+  method = RPCAIntegration,
+  verbose = F,
+  dims = 1:20)
+
+Subset <- JoinLayers(Subset)
+#Dimensionality reduction 
+Subset <- FindNeighbors(Subset, dims = 1:20, reduction = "integrated.dr")
+# Resolution determines number of clusters!
+Subset <- FindClusters(Subset, resolution = 1)
+# Use the dimensions of integrated.dr to run a UMAP 
+variable <- VariableFeatures(Subset, selection.method = "vst", nfeatures = 70)
+Subset <- RunUMAP(Subset, reduction = "integrated.dr", features = variable,seed.use = 2024, n.neighbors = 15, n.epochs = 500)
+DimPlot(Subset, group.by = "Condition")
+```
+
+# Cell-typing using InsituType
+https://github.com/Nanostring-Biostats/InSituType
+```{r Insitutype, eval = FALSE}
+#devtools::install_github("https://github.com/Nanostring-Biostats/InSituType")
+
+expression_matrix <- GetAssayData(object = Subset, slot = "counts")
+expression_matrix <- as(expression_matrix, "matrix")
+expression_matrix_tr <- Matrix::t(expression_matrix)
+
+NegativeProbes <- FetchData(object = Subset, layer = "counts", vars = Negatives)
+MeanNegativeProbes <- rowMeans(NegativeProbes)
+mean_negatives = mean(MeanNegativeProbes)
+
+#This is found on https://github.com/Nanostring-Biostats/CosMx-Cell-Profiles
+MouseBrain_profiles <- read_csv("MouseBrain.profiles.csv", col_names = TRUE)
+
+# Convert tibble to data frame
+MouseBrain_profiles <- as.data.frame(MouseBrain_profiles)
+# Set the first column as row names
+row.names(MouseBrain_profiles) <- MouseBrain_profiles[[1]]
+# Remove the first column from the dataframe
+MouseBrain_profiles <- MouseBrain_profiles[-1]
+
+#There is a bug and workaround where you need to get it as matrix first.https://github.com/Nanostring-Biostats/InSituType/issues/201
+MouseBrain_profiles <- as.matrix(MouseBrain_profiles)
+
+# Define the cohorts here
+cohorts = cbind(Subset$volume, Subset$SPIN)
+# Calculate the cohorts
+cohorted <- fastCohorting(cohorts)
+
+#Supervised clustering with cohort made out of a matrix 
+sup <- InSituType::insitutypeML(x = expression_matrix_tr,
+                    neg = MeanNegativeProbes, cohort = cohorted,
+                    reference_profiles = MouseBrain_profiles)
+
+#Add clust to meta.data 
+cell_ids <- colnames(GetAssayData(object = Subset, slot = "counts"))
+matched_values <- sup$clust[cell_ids]
+# Assign celltypes to a new metadata column in Subset
+Subset@meta.data$Type_sup_all <- matched_values
+#Do it again for probabilities
+matched_values <- sup$prob[cell_ids]
+Subset@meta.data$Type_prob_all <- matched_values
+
+Idents(Subset) <- Subset$Type_sup_all
+probs <- data.frame(x = Subset$Type_sup_all, y = Subset$Type_prob_all)
+
+counts_probs <- table(probs$x)
+counts_df <- as.data.frame(counts_probs)
+names(counts_df) <- c("Category", "Count")
+mean_probs <- probs %>%
+  group_by(x) %>%
+  summarize(Mean = mean(y))
+```
+
+## Grouping based on InSituType
+```{r Grouping, eval = FALSE}
+celltypes <- list(
+    Other = list(
+        Other = list(
+            "T cell",
+            "Choroid plexus epithelial cells",
+            "Neuroblasts",
+            "Hypendymal",
+            "Ependymal cells",
+            "Tanycytes",
+            "Vascular leptomeningeal cells"
+        )
+    ),
+    Immune = list(
+        Myeloid = list(
+            "Microglia",
+            "Perivascular macrophages"
+        )
+    ),
+    Vascular = list(
+        Vascular = list(
+        "Pericytes",
+        "Vascular endothelial cells",
+        "Vascular smooth muscle cells")
+    ),
+    Glia = list(
+        Astrocytes = list(
+            "Astrocytes thalamus hypothalamus",
+            "Astrocytes cortex hippocampus"
+        ),
+        "Radial glia" = list(
+            "Olfactory ensheathing cells",
+            "Radial glia",
+            "Astrocytes Bergmann glia"
+        ),
+        Oligodendrocyte = list(
+            "Committed oligodendrocytes",
+            "Myelin forming oligodendrocytes",
+            "Mature oligodendrocytes",
+            "Newly-formed oligodendrocytes",
+            "Oligodendrocyte precursor cells"
+        )
+    ),
+    Neuron = list(
+        `Excitatory neuron` = list(
+            `Telencephalon excitatory neuron` = list(
+                `Cortical excitatory neuron` = list(
+                    "Excitatory neurons amygdala",
+                    "Excitatory neurons layer 1 piriform",
+                    "Excitatory neurons layer 2/3",
+                    "Excitatory neurons layer 4",
+                    "Excitatory neurons layer 5",
+                    "Excitatory neurons layer 6",
+                    "Excitatory neurons layer 5/6",
+                    "Excitatory neurons telencephalon"
+                ),
+                `Hippocampal excitatory neuron` = list(
+                    "Excitatory neurons hippocampal CA1",
+                    "Excitatory neurons hippocampal CA2",
+                    "Excitatory neurons hippocampal CA3",
+                    "Granule neurons",
+                    "Cajal-Retzius cells"
+                )
+            ),
+            `Non-telencephalon excitatory neuron` = list(
+                "Excitatory neurons di/mesencephalon",
+                "Hindbrain excitatory neurons"
+            )
+        ),
+        `Peptidergic neurons` = list(
+            "Cholinergic neurons habenula",
+            "Dopaminergic neurons",
+            "Serotonergic neurons",
+            "Peptidergic neurons"
+        ),
+        `Inhibitory neuron` = list(
+            "Hindbrain inhibitory neurons",
+            "Inhibitory interneurons",
+            "Inhibitory neurons amygdala",
+            "Inhibitory neurons habenula hypothalamus",
+            "Inhibitory neurons habenula thalamus",
+            "Inhibitory neurons reticular nucleus",
+            "Telencephalon inhibitory neurons",
+            "Olfactory bulb inhibitory neurons",
+            "Purkinje cells",
+            "Neurogliaform cells",
+            "Interneurons",
+            "Interneuron selective interneurons",
+            "CCK interneurons",
+            "D1 medium spiny neurons",
+            "D2 medium spiny neurons"
+        )
+    )
+)
+
+
+# Function to get hierarchical levels for a cell type
+get_hierarchy <- function(cell_type, hierarchy) {
+  # Initialize result with NA values for each level
+  result <- rep(NA, 4)
+  
+  # Recursive function to search for cell_type in the hierarchy
+  search_hierarchy <- function(type_list, levels, depth) {
+    if (depth > 4) return(FALSE)  # Limit depth to avoid infinite recursion
+    for (name in names(type_list)) {
+      item <- type_list[[name]]
+      if (cell_type %in% item) {
+        result[depth] <<- name
+        return(TRUE)
+      }
+      if (is.list(item)) {
+        if (search_hierarchy(item, levels, depth + 1)) {
+          result[depth] <<- name
+          return(TRUE)
+        }
+      }
+    }
+    return(FALSE)
+  }
+  
+  # Start the search
+  if (search_hierarchy(hierarchy, result, 1)) {
+    return(result)
+  } else {
+    return(rep(NA, 4))  # If not found, return NA for all levels
+  }
+}
+
+metadata_df <- data.frame(Type_sup_all = Subset@meta.data$Type_sup_all)
+hierarchy_df <- as.data.frame(t(sapply(metadata_df$Type_sup_all, get_hierarchy, hierarchy = celltypes)), stringsAsFactors = FALSE)
+
+# Rename the columns to match the hierarchy levels
+colnames(hierarchy_df) <- c("Supergroup", "Cat", "Subcat1", "Subcat2")
+
+# Combine the hierarchy information with the existing metadata
+updated_metadata <- cbind(Subset@meta.data, hierarchy_df)
+# Update Seurat object metadata with new columns
+Subset@meta.data <- updated_metadata
+
+# Save the updated Seurat object
+# saveRDS(Subset, "NAME.RDS")
+
+# Change NA's to "Nothing" so the DEG works
+if ("Supergroup" %in% colnames(Subset@meta.data)) {
+  Subset@meta.data$Supergroup[is.na(Subset@meta.data$Supergroup)] <- "Nothing"
+} else {
+  message("The 'Supergroup' column does not exist in the metadata.")
+}
+```
+
+## SubsetUMAP for the UMAP coordinates 
+Based on NanoString's recommendations, the normalization for UMAP is slightly different (log vs linear). 
+Only for visualization purposes
+```{r SubsetUMAP, eval = FALSE}
+SubsetUMAP <- Subset
+
+SubsetUMAP[["RNA"]] <- split(SubsetUMAP[["RNA"]], f = SubsetUMAP$TMA)
+SubsetUMAP <- NormalizeData(SubsetUMAP, normalization.method = "LogNormalize", scale.factor = 1e6)
+#The number of variable features should be a fraction of the total available features, depending on the 1K, 6K or WT panel 
+SubsetUMAP <- FindVariableFeatures(SubsetUMAP, selection.method = "vst", nfeatures = 70, layer = "data")
+negative_probes <- grep("Negative", VariableFeatures(SubsetUMAP), value = TRUE)
+filtered_features <- setdiff(VariableFeatures(SubsetUMAP), negative_probes)
+
+# Set the filtered VariableFeatures
+VariableFeatures(SubsetUMAP) <- filtered_features
+
+toppers <- head(VariableFeatures(SubsetUMAP), 10)
+all.genes <- rownames(SubsetUMAP)
+
+SubsetUMAP <- ScaleData(SubsetUMAP, features = all.genes, vars.to.regress = c("nCount_RNA"))
+#The PCA is run for rPCA integration! 
+SubsetUMAP <- RunPCA(SubsetUMAP, features = VariableFeatures(object = SubsetUMAP), approx = TRUE)
+ElbowPlot(SubsetUMAP)
+
+#Integration
+SubsetUMAP <- IntegrateLayers(
+  object = SubsetUMAP,
+  method = RPCAIntegration,
+  verbose = F,
+  dims = 1:10, k.weight = 94)
+
+SubsetUMAP <- JoinLayers(SubsetUMAP)
+#Dimensionality reduction 
+SubsetUMAP <- FindNeighbors(SubsetUMAP, dims = 1:10, reduction = "integrated.dr")
+# Resolution determines number of clusters!
+SubsetUMAP <- FindClusters(SubsetUMAP, resolution = 1)
+# Use the dimensions of integrated.dr to run a UMAP 
+variable <- VariableFeatures(SubsetUMAP)
+SubsetUMAP <- RunUMAP(
+  object = SubsetUMAP,
+  reduction = "integrated.dr", features = variable,  
+  n.neighbors = 15,
+  n.epochs = 500,
+  seed.use = 2024
+)
+DimPlot(SubsetUMAP, group.by = "Condition")
+
+saveRDS(SubsetUMAP, "SubsetUMAP_2_5.RDS")
+```
+
+### Finding markers per InSituType cluster
+```{r Finding markers, eval = FALSE}
+#Set identity to the clusters
+Idents(Subset) <- Subset$Type_sup_all
+Subset.markers <- FindAllMarkers(Subset, only.pos = TRUE)
+Subset.markers %>%
+    group_by(cluster) %>%
+    #only take FC greater than 1 
+    dplyr::filter(avg_log2FC > 1) %>%
+    #take top 10
+    slice_head(n = 5) %>%
+    ungroup() -> top5
+View(top5)
+
+all_features <- rownames(Subset)
+
+# Filter out features containing "Negative"
+filtered_features <- all_features[!grepl("Negative", all_features)]
+# Scale the data with the filtered features
+Subset <- ScaleData(Subset, features = filtered_features)
+```
+
+# DEG analysis (Panel 4B, 4C)
+Here you do DEG analysis on the subtypes or supergroups. There are some variables in this code you need to set, namely selected_colnames, and also the xx == i just in the beginning of the for-loop. It also forces the FindMarkers argument to keep all features in, even if there is no detection of these in both groups and thus no FC. This is important for GSEA analysis.
+It's using MAST.
+```{r Deg on all relevant subtypes, eval = FALSE}
+#Pick one of the two based on what you want to compare
+selected_colnames <- unique(Subset$Supergroup)
+selected_colnames <- unique(Subset$Type_sup_all)
+selected_colnames <- unique(Subset$Cat)
+
+result_supers <- list()
+#Define all genes you need. There are negative controls in here you want to exclude since they increase padj 
+all_genes <- rownames(Subset)
+#Filter out names starting with "Negative"
+genes <- all_genes[!grepl("^Negative", all_genes)]
+
+Idents(Subset) <- Subset$Condition
+# Iterate over selected_colnames
+for (i in selected_colnames) {
+  # Subset the Seurat object based on Supergroup
+  subset_Subset <- subset(Subset, Supergroup == i)
+  print(i)
+  
+  # Initialize an empty data frame to store results for the current iteration
+  result_super <- data.frame()
+
+  # Perform FindMarkers command with error handling
+  tryCatch({
+    DEG1 <- FindMarkers(subset_Subset, ident.1 = "y", ident.2 = "n", slot = "data", min.pct = 0, logfc.threshold = 0, features = genes, test.use = "MAST")
+    DEG1$i <- i  # Add Supergroup information
+    DEG1$ident1 <- "y"
+    DEG1$ident2 <- "n"
+    result_super <- bind_rows(result_super, DEG1)
+  }, error = function(e) {
+    message(paste("Skipping due to error in FindMarkers for", i, ":", e$message))
+  })
+  
+  # Append result_super to result_supers if it's not empty
+  if (nrow(result_super) > 0) {
+    result_supers <- bind_rows(result_supers, result_super)
+  }
+}
+
+# Extract gene names from row names
+result_supers$Gene <- gsub("\\.\\.\\..*", "", rownames(result_supers))
+#This gives 1 big table with all the FC and DEGS within each possible comparison. Use this for plotting the Volcanoplots 
+
+#Write the CSV, give appropriate name (remove hash # to write automatically)
+#write_csv(result_supers, "DEGS_Types.csv")
+
+
+plots_list <- list()
+# Loop through each unique name in column 'i'
+for (name in unique(result_supers$i)) {
+  # Subset the data for Ru and C126905
+  ru_data <- subset(result_supers, i == name & ident1 == "y")
+
+  
+  # Create the volcano plots for irradiated
+ru_plot <- ggplot(ru_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(aes(color = p_val_adj < 0.05), size = 1.5) +
+  scale_color_manual(values = c("black", "red")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = c(0, 0.5, -0.5), linetype = "dashed", color = c("black", "green", "green")) +
+  geom_text(data = subset(ru_data, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05), 
+            aes(label = Gene), hjust = -0.1, vjust = 0) +
+  labs(x = "Average log2 Fold Change", y = "-log10(Adjusted p-value)",
+       title = paste("Volcano Plot of", name, "in irradiated over non-irradiated")) +
+  theme_minimal() 
+ 
+  
+  # Generate file names
+  ru_pdf_file <- paste0("plot_", gsub("/", "_", name), "_irradiated.pdf")
+  
+  # Save plots as PDF files
+  #ggsave(ru_pdf_file, ru_plot, width = 8, height = 6)
+
+  
+  # Store the plots in the list
+  plots_list[[name]] <- list(ru_plot = ru_plot)
+}
+```
+
+# Gene specific statistics (Panel 4D)
+```{r Gene specific statistics, eval = FALSE}
+Subset <- ScaleData(Subset, features = all.genes)
+
+goi <- c("Pdgfra","Plp1")
+expression <- FetchData(Subset, vars = goi)
+expression <- as.data.frame(expression)
+expression$cell <- Subset$cell
+expression$Condition <- Subset$Condition
+expression$Type_sup_all <- Subset$Type_sup_all
+expression$Type_prob_all <- Subset$Type_prob_all
+expression$Cat <- Subset$Cat  
+
+# Filter the dataframe for "Oligodendrocyte precursor cells"
+filtered_df <- expression[expression$Type_sup_all == "Oligodendrocyte precursor cells", ]
+
+#Does take the 0's into account. So the mean of y is lower, but that's due to more 0 values in there. See bootstrapping
+means <- aggregate(Pdgfra ~ Condition, data = filtered_df, FUN = mean)
+
+# Perform a t-test (or Wilcoxon test if data is not normally distributed) between the two conditions
+stat_test <- wilcox.test(Pdgfra ~ Condition, data = filtered_df)
+
+# Generate the plot
+ggplot(filtered_df, aes(x = Condition, y = Pdgfra)) +
+  geom_violin(trim = FALSE) +  # Violin plot
+  geom_boxplot(width = 0.1, outlier.shape = NA) +  # Boxplot inside violin plot
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Show individual data points with jitter
+  stat_summary(fun = mean, geom = "point", color = "red", size = 3, shape = 18) +  # Show the mean as a red diamond
+  stat_summary(fun = mean, geom = "text", aes(label = round(..y.., 2)), vjust = -1.5) +  # Show the mean as text
+  scale_y_continuous(expand = c(0, 0)) +  # Ensure the y-axis starts at 0
+  ggtitle("Gene Expression of Pdgfra per Condition (Including Zeros)") +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", label.y = max(filtered_df$Pdgfra) + 1)  # Add test result
+
+
+# Violins without 0's 
+# 0-inflated data
+filtered_df_no_zeros <- filtered_df[filtered_df$Pdgfra > 0, ]
+means_no_zeros <- aggregate(Pdgfra ~ Condition, data = filtered_df_no_zeros, FUN = mean)
+
+# Perform a Wilcoxon test between the two conditions, excluding zero values
+stat_test_no_zeros <- wilcox.test(Pdgfra ~ Condition, data = filtered_df_no_zeros)
+
+# Generate the plot excluding zero values
+ggplot(filtered_df_no_zeros, aes(x = Condition, y = Pdgfra)) +
+  geom_violin(trim = FALSE) +  # Violin plot
+  geom_boxplot(width = 0.1, outlier.shape = NA) +  
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  stat_summary(fun = mean, geom = "point", color = "red", size = 3, shape = 18) + 
+  stat_summary(fun = mean, geom = "text", aes(label = round(..y.., 2)), vjust = -1.5) +  
+  scale_y_continuous(expand = c(0, 0)) + 
+  ggtitle("Gene Expression of Pdgfra per Condition (Excluding Zeros)") +
+  theme_minimal() +
+  stat_compare_means(method = "wilcox.test", label.y = max(filtered_df_no_zeros$Pdgfra) + 1)  
+
+# Percentages of 0 
+counts <- filtered_df %>%
+  group_by(Condition) %>%
+  summarise(
+    Zero_Counts = sum(Pdgfra == 0),
+    Non_Zero_Counts = sum(Pdgfra != 0),
+    Total_Counts = n()
+  ) %>%
+  mutate(
+    Proportion_Zero = Zero_Counts / Total_Counts,
+    Proportion_Non_Zero = Non_Zero_Counts / Total_Counts
+  )
+
+# Reshape data to long format
+counts_long <- counts %>%
+  pivot_longer(cols = starts_with("Proportion"),
+               names_to = "Category",
+               values_to = "Proportion")
+
+# Generate the proportional bar graph
+ggplot(counts_long, aes(x = Condition, y = Proportion, fill = Category)) +
+  geom_bar(stat = "identity") +  # Bar plot
+  geom_text(aes(label = scales::percent(Proportion)), position = position_stack(vjust = 0.5)) +  # Add percentage labels inside bars
+  geom_text(data = counts, aes(x = Condition, y = 1.05, label = paste("n =", Total_Counts)), 
+            vjust = -0.5, size = 4, inherit.aes = FALSE) +  # Add total counts above bars
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1.2)) +  # Scale y-axis to percentage with padding
+  scale_fill_manual(values = c("Proportion_Zero" = "lightblue", "Proportion_Non_Zero" = "steelblue")) +  # Colors
+  ggtitle("Proportion of Zero and Non-Zero Values for Pdgfra per Condition") +
+  ylab("Proportion") +
+  xlab("Condition") +
+  theme_minimal()
+
+
+## Bootstrap 0% in cells
+# Take 415 n (not irradiated) cells and 450 y (irradiated) cells randomly
+# Calculate the % of zero and non-zero per condition
+# Bootstrap this a 10K times 
+# Note this bootstrap samples from ALL cells, you can also first filter expression on Cat == "Oligodendrocyte" to be a bit more specific 
+
+condition_n <- expression %>% filter(Condition == 'n')
+condition_y <- expression %>% filter(Condition == 'y')
+
+# Define the number of cells to sample for each condition
+n_cells_n <- 415
+n_cells_y <- 450
+
+# Function to calculate proportion of zero values
+calc_proportion_zero <- function(df, num_cells) {
+  sampled_df <- df %>% sample_n(num_cells, replace = TRUE)  # Sample with replacement
+  proportion_zero <- mean(sampled_df$Pdgfra == 0)  # Calculate proportion of zeros
+  return(proportion_zero)
+}
+
+# Bootstrap process
+set.seed(123)  # Set seed for reproducibility
+bootstrap_results <- replicate(10000, {
+  prop_zero_n <- calc_proportion_zero(condition_n, n_cells_n)
+  prop_zero_y <- calc_proportion_zero(condition_y, n_cells_y)
+  c(prop_zero_n, prop_zero_y)
+})
+
+# Convert results to a dataframe
+bootstrap_df <- as.data.frame(t(bootstrap_results))
+colnames(bootstrap_df) <- c("Proportion_Zero_n", "Proportion_Zero_y")
+
+# Convert to long format for ggplot
+bootstrap_long <- bootstrap_df %>%
+  pivot_longer(cols = everything(), names_to = "Condition", values_to = "Proportion_Zero") %>%
+  mutate(Condition = recode(Condition, 
+                            "Proportion_Zero_n" = "Condition n", 
+                            "Proportion_Zero_y" = "Condition y"))
+
+# Summary statistics
+summary_stats <- bootstrap_df %>%
+  summarise(
+    Mean_n = mean(Proportion_Zero_n),
+    SD_n = sd(Proportion_Zero_n),
+    Mean_y = mean(Proportion_Zero_y),
+    SD_y = sd(Proportion_Zero_y)
+  )
+
+print(summary_stats)
+
+# Plot distributions with legend
+# This means the irradiated sample always has a higher chance of having a 0 value in Pdgfra than the non-irradiated sample 
+ggplot(bootstrap_long, aes(x = Proportion_Zero, fill = Condition, color = Condition)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Bootstrap Distributions of Proportion of Zero Values",
+       x = "Proportion of Zero Values",
+       y = "Density") +
+  scale_fill_manual(values = c("Condition n" = "blue", "Condition y" = "red")) +
+  scale_color_manual(values = c("Condition n" = "blue", "Condition y" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+bootstrap_df <- as.data.frame(t(bootstrap_results))
+colnames(bootstrap_df) <- c("Proportion_Zero_n", "Proportion_Zero_y")
+
+# Calculate the difference in proportions for each bootstrap sample
+bootstrap_df$Difference <- bootstrap_df$Proportion_Zero_n - bootstrap_df$Proportion_Zero_y
+
+# Calculate observed difference
+observed_diff <- mean(condition_n$Pdgfra == 0) - mean(condition_y$Pdgfra == 0)
+
+# Calculate p-value
+p_value <- mean(abs(bootstrap_df$Difference) >= abs(observed_diff))
+
+print(paste("p-value:", p_value))
+# No signficiant difference between the 0 proportion of pdgfra between conditions
+
+bootstrap_df <- as.data.frame(t(bootstrap_results))
+colnames(bootstrap_df) <- c("Proportion_Zero_n", "Proportion_Zero_y")
+
+# Calculate the difference in proportions for each bootstrap sample
+bootstrap_df$Difference <- bootstrap_df$Proportion_Zero_n - bootstrap_df$Proportion_Zero_y
+
+# Observed proportions
+observed_prop_n <- xxx
+observed_prop_y <- yyy
+
+# Calculate the observed difference
+observed_diff <- observed_prop_n - observed_prop_y
+
+# Calculate p-value
+p_value <- mean(abs(bootstrap_df$Difference) >= abs(observed_diff))
+
+# Print the results
+print(paste("Observed Difference:", observed_diff))
+print(paste("p-value:", p_value))
+
+ggplot(bootstrap_df, aes(x = Difference)) +
+  geom_histogram(binwidth = 0.01, fill = "grey", color = "black") +
+  geom_vline(xintercept = observed_diff, color = "red", linetype = "dashed") +
+  labs(title = "Distribution of Bootstrap Differences",
+       x = "Difference in Proportions",
+       y = "Frequency") +
+  theme_minimal()
+
+# Probability of being called an OPC
+oligo_cells <- expression %>% filter(Type_sup_all == "Oligodendrocyte precursor cells")
+
+# Calculate the mean probability
+mean_prob <- mean(oligo_cells$Type_prob_all, na.rm = TRUE)
+print(paste("Mean Probability for Oligodendrocyte precursor cells:", round(mean_prob, 3)))
+
+# Filter data by conditions
+condition_y <- oligo_cells %>% filter(Condition == "y")
+condition_n <- oligo_cells %>% filter(Condition == "n")
+
+# Perform a Wilcoxon test if data is not normally distributed
+wilcox_test_result <- wilcox.test(condition_y$Type_prob_all, condition_n$Type_prob_all)
+print("Wilcoxon test result:")
+print(wilcox_test_result)
+
+# Summary statistics for each condition
+summary_stats_y <- condition_y %>%
+  summarise(
+    Mean = mean(Type_prob_all, na.rm = TRUE),
+    Median = median(Type_prob_all, na.rm = TRUE),
+    SD = sd(Type_prob_all, na.rm = TRUE),
+    Min = min(Type_prob_all, na.rm = TRUE),
+    Max = max(Type_prob_all, na.rm = TRUE)
+  )
+
+summary_stats_n <- condition_n %>%
+  summarise(
+    Mean = mean(Type_prob_all, na.rm = TRUE),
+    Median = median(Type_prob_all, na.rm = TRUE),
+    SD = sd(Type_prob_all, na.rm = TRUE),
+    Min = min(Type_prob_all, na.rm = TRUE),
+    Max = max(Type_prob_all, na.rm = TRUE)
+  )
+
+# Print summary statistics
+print("Summary statistics for Condition y:")
+print(summary_stats_y)
+
+print("Summary statistics for Condition n:")
+print(summary_stats_n)
+
+```
+
+# GSEA analysis 
+```{r GSEA, eval = FALSE}
+# Rerun the result_supers code (DEG analysis) or open the csv file associated with either supergroups or celltypes 
+# !!! Set unique types as $Type_sup_all or $Supergroup !!! #
+unique_types <- unique(Subset$Supergroup)
+
+## Pathway hallmarks analysis 
+##The pathway hallmarks can be found on https://www.gsea-msigdb.org/gsea/msigdb/mouse/collections.jsp?targetSpeciesDB=Mouse#M5
+pathways.hallmark <- gmtPathways("mh.all.v2023.2.Mm.symbols.gmt.txt")
+pathways.mf <- gmtPathways("m5.go.mf.v2023.2.Mm.symbols.gmt.txt")
+pathways.bp <- gmtPathways("m5.go.bp.v2023.2.Mm.symbols.gmt.txt")
+
+# https://www.nature.com/articles/s41467-022-32552-1#MOESM4
+SenMayo <- genes <- c(
+  "Acvr1b", "Ang", "Angpt1", "Angptl4", "Areg", "Axl", "Bex3", "Bmp2", "Bmp6", 
+  "C3", "Ccl1", "Ccl2", "Ccl20", "Ccl24", "Ccl26", "Ccl3", "Ccl4", "Ccl5", 
+  "Ccl7", "Ccl8", "Cd55", "Cd9", "Csf1", "Csf2", "Csf2rb", "Cst10", "Ctnnb1", 
+  "Ctsb", "Cxcl1", "Cxcl10", "Cxcl12", "Cxcl16", "Cxcl2", "Cxcl3", "Cxcr2", 
+  "Dkk1", "Edn1", "Egf", "Egfr", "Ereg", "Esm1", "Ets2", "Fas", "Fgf1", 
+  "Fgf2", "Fgf7", "Gdf15", "Gem", "Gmfg", "Hgf", "Hmgb1", "Icam1", "Icam5", 
+  "Igf1", "Igfbp1", "Igfbp2", "Igfbp3", "Igfbp4", "Igfbp5", "Igfbp6", "Igfbp7", 
+  "Il10", "Il13", "Il15", "Il18", "Il1a", "Il1b", "Il2", "Il6", "Il6st", 
+  "Il7", "Inha", "Iqgap2", "Itga2", "Itpka", "Jun", "Kitl", "Lcp1", "Mif", 
+  "Mmp13", "Mmp10", "Mmp12", "Mmp14", "Mmp2", "Mmp3", "Mmp9", "Nap1l4", 
+  "Nrg1", "Pappa", "Pecam1", "Pgf", "Pigf", "Plat", "Plau", "Plaur", "Ptbp1", 
+  "Ptger2", "Ptges", "Rps6ka5", "Scamp4", "Selplg", "Sema3f", "Serpinb3a", 
+  "Serpine1", "Serpine2", "Spp1", "Spx", "Timp2", "Tnf", "Tnfrsf11b", "Tnfrsf1a", 
+  "Tnfrsf1b", "Tubgcp2", "Vegfa", "Vegfc", "Vgf", "Wnt16", "Wnt2")
+
+#Senescence and quiescence genes as defined by Nanostring 
+SenNANO <- c(
+  "Ago3", "Anapc16", "Atm", "Atr", "Btrc", "Cacna1d", "Calm1", "Calm2", "Calm3",
+  "Ccl2", "Cdc27", "Cdk6", "Cxcl2", "Fbxw11", "Foxo1", "Foxo3", "H3f3b", "Hipk2",
+  "Id1", "Id2", "Igfbp7", "Il6", "Itpr1", "Itpr2", "Map2k4", "Map2k6", "Map3k5",
+  "Map4k4", "Mapk14", "Mapk8", "Mcu", "Nfkb1", "Phc2", "Phc3", "Ppp3ca", "Pten",
+  "Raf1", "Rb1", "Sirt1", "Slc25a4", "Smad2", "Smad3", "Stat3", "Terf2ip", "Tfdp2",
+  "Tgfb1", "Tgfb2", "Tgfbr1", "Tnik", "Tnrc6a", "Tnrc6b", "Tnrc6c", "Trp53",
+  "Trpm7", "Ube2e1"
+)
+
+
+#Code to plot individual enrichment plots of pathways of your choice
+pathways <- list("Senes" = SenMayo, "SenesNANO" = SenNANO)
+
+#Set your own i and ident1, should be present in result_supers
+item <- subset(result_supers, subset = i == "Glia" & ident1 == "y")
+gseFC <- item$avg_log2FC
+genes <- item$Gene
+names(gseFC) <- genes
+gseFC_clean <- gseFC[!is.na(names(gseFC))]
+# Needs to be sorted for GSEA
+gseFC_sort <- sort(gseFC_clean, decreasing = TRUE)
+
+# If you have custom pathways, add gene_vector to your pathways
+# pathways.hallmark$custom_pathway <- gene_vector
+
+# Run them all at the same time
+# Minsize is important of minimum number of genes found in pathway
+# Change pathways.bp or pathways.hallmark to what you want to look at 
+gsea_result <- fgseaMultilevel(pathways = pathways.bp, minSize = 40,
+                               stats = gseFC_sort)
+
+## CODE TO PLOT TOP 10 GSEA 
+topPathwaysUp <- gsea_result[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- gsea_result[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+plotGseaTable(pathways.bp[topPathways], gseFC_sort, gsea_result, 
+              gseaParam=0.5)
+
+gsea_result <- fgseaMultilevel(
+    pathways = pathways, 
+    stats = gseFC_sort,
+    minSize = 15,  # Adjust based on your specific needs
+    maxSize = 500  # Adjust based on your specific needs
+)
+plotEnrichment(pathways[["Senes"]], stats = gseFC_sort)
+
+# Extract the result of your custom pathway, or any pathway by changing what's in between " " 
+custom_pathway_result <- gsea_result[gsea_result$pathway == "NAME", ]
+
+# Unhash if you want to write the results of all GSEAs 
+#write_csv(gsea_result, "GSEA_C125_Vehicle.csv")
+```
+
+## GSEA on a single cell basis (Panel 4E)
+```{r GSEA single cell, eval = FALSE}
+expression_data <- GetAssayData(Subset, slot = "data")
+pathways <- list("Senes" = SenMayo, "SenesNANO" = SenNANO)
+
+# Define your gene sets
+# Take care here because it will append a column to metadata for each gene set 
+ 
+gsva_results <- gsva(expression_data, pathways, method = "ssgsea")
+
+# Convert GSVA results into a data frame and add to Seurat metadata
+gsva_results_transposed <- t(gsva_results)
+gsva_results_df <- as.data.frame(gsva_results_transposed)
+
+umap_coords <- as.data.frame(Embeddings(SubsetUMAP, "umap"))
+umap_coords$Senes <- gsva_results_df$Senes
+umap_coords$SenesNANO <- gsva_results_df$SenesNANO
+umap_coords$Condition <- Subset$Condition
+umap_coords$Supergroup <- Subset$Supergroup
+umap_coords$Type_sup_all <- Subset$Type_sup_all
+umap_coords$Cat <- Subset$Cat
+
+#Note there are ways to smooth the datapoints https://nanostring-biostats.github.io/CosMx-Analysis-Scratch-Space/posts/marker-gene-smoothing/
+ggplot(umap_coords, aes(x = umap_1, y = umap_2, color = Senes)) +
+  geom_point() +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(title = "UMAP Plot Colored by Counts",
+       x = "UMAP 1",
+       y = "UMAP 2") +
+  theme_minimal() + facet_wrap("Condition")
+
+# Plot distribution of senescence per cell
+filtered_data <- subset(umap_coords, Cat == "Oligodendrocyte")
+
+# Convert 'Condition' to a factor
+filtered_data$Condition <- as.factor(filtered_data$Condition)
+#Change for Senes or SENESNANO
+ggplot(filtered_data, aes(x = SenesNANO, fill = Condition, color = Condition)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Senes Values by Condition (Oligodendrocyte precursor cells)",
+       x = "Senes Value",
+       y = "Density") +
+  scale_fill_manual(values = c("y" = "blue", "n" = "red"), 
+                    name = "Condition") +  # Set legend title
+  scale_color_manual(values = c("y" = "blue", "n" = "red"), 
+                     name = "Condition") +  # Set legend title
+  theme_minimal() +
+  theme(legend.position = "top")
+
+
+# Sampling 31 random genes to bootstrap
+filtered_genes <- all.genes[!grepl("Negative", all.genes, ignore.case = TRUE)]
+set.seed(123)  # Set seed for reproducibility
+sample_list <- list()
+
+# Perform the sampling 1000 times
+for (i in 1:1000) {
+  sampled_genes <- sample(filtered_genes, 31, replace = FALSE)  # Sample 31 genes without replacement
+  sample_list[[paste0("sample_", i)]] <- sampled_genes  # Name each element as sample_1, sample_2, etc.
+}
+print(sample_list)
+
+pathways <- c(pathways, sample_list)
+
+gsva_results <- gsva(expression_data, pathways, method = "ssgsea")
+# Convert GSVA results into a data frame and add to Seurat metadata
+gsva_results_transposed <- t(gsva_results)
+gsva_results_df <- as.data.frame(gsva_results_transposed)
+average_distribution <- colMeans(gsva_results_df[, 3:1002])
+ks_test_result <- ks.test(gsva_results_df[, 1], average_distribution)
+print(ks_test_result$p.value)
+
+# [,1] for SenMayo [,2] for SenesNANO
+plot_data <- data.frame(
+  Value = c(gsva_results_df[, 1],average_distribution),
+  Distribution = factor(rep(c("Column 1", "Average Distribution"), 
+                            times = c(nrow(gsva_results_df), length(average_distribution))))
+)
+
+# Plot the distributions
+ggplot(plot_data, aes(x = Value, fill = Distribution)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of SenMAYO vs. Average Distribution",
+       x = "Value",
+       y = "Density") +
+  scale_fill_manual(values = c("Column 1" = "blue", "Average Distribution" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+# Distance analysis celltype (Panel 4F) 
+```{r Distance per celltype, eval = FALSE}
+Subset1 <- subset(Subset, Condition == "y")
+Subset2 <- subset(Subset, Condition == "n")
+
+# Store subsets in a list
+sets <- list(Subset1 = Subset1, Subset2 = Subset2)
+
+# Initialize a vector to store distances for the original Seurat object
+distance_to_nearest_list <- vector("list", length(sets))
+
+# Loop through each subset and compute distances
+for (set_name in names(sets)) {
+  # Extract the current Seurat object
+  seurat_obj <- sets[[set_name]]
+  
+  # Extract metadata
+  metadata <- seurat_obj@meta.data
+  
+  # Extract coordinates and Type_sup_all
+  coordinates <- metadata %>%
+    select(centroid_x, centroid_y, centroid_z, Type_sup_all)
+  
+  # Create logical vectors
+  is_microglia <- coordinates$Type_sup_all == "Microglia"
+  is_not_microglia <- !is_microglia
+  
+  # Convert to numeric matrices
+  microglia_cells <- as.matrix(coordinates[is_microglia, c("centroid_x", "centroid_y", "centroid_z")])
+  other_cells <- as.matrix(coordinates[is_not_microglia, c("centroid_x", "centroid_y", "centroid_z")])
+  
+  # Check if there are any cells
+  if (nrow(microglia_cells) == 0) {
+    stop("No cells with Type_sup_all equal to input")
+  }
+  
+  # Create KD-tree and find nearest neighbors
+  tree <- nabor::knn(microglia_cells, k = 1)
+  nn_result <- nabor::knn(microglia_cells, other_cells, k = 1)
+  nn_distances <- nn_result$nn.dists
+  
+  # Create a vector for distances
+  distance_to_nearest <- rep(NA, nrow(metadata))
+  distance_to_nearest[is_not_microglia] <- nn_distances
+  distance_to_nearest[is.na(distance_to_nearest)] <- 0
+  
+  # Add the distance column to the Seurat object's metadata
+  seurat_obj <- AddMetaData(seurat_obj, metadata = distance_to_nearest, col.name = "distance_to_nearest")
+  
+  # Store distances in the list
+  distance_to_nearest_list[[set_name]] <- distance_to_nearest
+}
+
+# Merge distance information back into the original Seurat object
+# Create a vector with the same length as the original metadata
+all_distances <- rep(NA, nrow(Subset@meta.data))
+
+# Fill distances from subsets
+for (set_name in names(sets)) {
+  seurat_obj <- sets[[set_name]]
+  metadata <- seurat_obj@meta.data
+  subset_distances <- distance_to_nearest_list[[set_name]]
+  
+  # Match the indices of the subset with the original Seurat object
+  match_indices <- match(rownames(metadata), rownames(Subset@meta.data))
+  all_distances[match_indices] <- subset_distances
+}
+
+# Add distances to the original Seurat object
+Subset <- AddMetaData(Subset, metadata = all_distances, col.name = "distance_to_nearest")
+
+bin_edges <- seq(0, max(Subset@meta.data$distance_to_nearest, na.rm = TRUE) + 25, by = 25)
+Subset@meta.data$distance_bin <- cut(Subset@meta.data$distance_to_nearest, breaks = bin_edges, include.lowest = TRUE)
+
+# Calculate proportions for each cell type within each bin and condition
+## !!! Swap Supergroup or Type_sup_all !!! ## 
+## Currently excludes NA values and "Nothing" from Supergroup 
+filtered_counts <- Subset@meta.data %>%
+  filter(!is.na(Supergroup) & Supergroup != "Nothing") %>%
+  group_by(Condition, distance_bin, Supergroup) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(Condition, distance_bin) %>%
+  mutate(proportion = count / sum(count))
+
+bin_labels <- levels(filtered_counts$distance_bin)
+
+# Plot the distribution of cell types with distance on the x-axis in bins of 100 µm
+ggplot(filtered_counts, aes(x = distance_bin, y = proportion, fill = Supergroup)) +
+  geom_bar(stat = 'identity', position = 'fill') +
+  facet_wrap(~ Condition) +  # Separate plots for each condition
+  labs(x = 'Distance to Nearest Microglia (um)', y = 'Proportion', 
+       title = 'Proportion of Cell Types by Distance to Nearest Microglia') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),  # Make x-axis labels vertical
+        legend.position = "right") +  # Position legend on the right
+  scale_x_discrete(breaks = bin_labels, labels = gsub("\\[|\\)", "", bin_labels))  # Format x-axis labels
+```
+
+# Visualisation
+## UMAP
+```{r UMAP, eval = FALSE}
+# In general, you get more plotting freedom by extracting the umap coordinates into a dataframe and using ggplot
+# Based on group.by it plots different things, it overrides Idents()
+DimPlot(Subset, reduction = "umap", group.by = "TMA")
+
+# Split by can be used to divide each umap into umaps per 'something', but it doesn't recalculate the distances of the subset. 
+DimPlot(Subset, reduction ="umap", split.by = "Supergroup", group.by = "TMA")
+```
+
+## Spatial
+Here most of the plots use the centroids, meaning that the plots will be slightly different than plotting polygons. However, they can be a good indication of what is going on.
+```{r Visualize on XY, eval = FALSE}
+#Map a certain cluster to UMAP
+umap_coords <- as.data.frame(Embeddings(SubsetUMAP, "umap"))
+umap_coords$Cluster <- Subset$Type_sup_all
+umap_coords$Condition <- Subset$Condition
+
+clustersub <- subset(umap_coords, Cluster == 2)
+# Create a single ggplot object and add both sets of pointsx
+ggplot() +
+  geom_point(data = umap_coords, aes(x = umap_1, y = umap_2), color = "grey") +
+  geom_point(data = clustersub, aes(x = umap_1, y = umap_2), color = "blue")
+
+#Add the counts of RNA as a variable to plot -- NOT IN LOG SCALE. Z-transformed or Log+1 might be better
+umap_coords$counts <- Subset$nCount_RNA
+#Custom colour where everything below 15 is black
+custom_color <- function(x) {
+  ifelse(x < 15, "black", scales::gradient_n_pal(c("blue", "yellow"))((x - 15) / (max(x) - 15)))
+}
+# Apply the custom color function to the counts
+umap_coords$color <- custom_color(umap_coords$counts)
+
+ggplot(umap_coords, aes(x = umap_1, y = umap_2, color = color)) +
+  geom_point() +
+  scale_color_identity() +
+  labs(title = "UMAP Plot Colored by  Counts",
+       x = "UMAP 1",
+       y = "UMAP 2") +
+  theme_minimal()
+
+#Gradient plot (for making the gradient and taking this to use in Illustrator and such )
+gradient_data <- data.frame(x = 1,  # Dummy x value for the bar
+                            y = 1,  # Dummy y value for the bar
+                            value = 1:100)  # Values from 1 to 100 for the gradient
+# Create the plot
+ggplot(gradient_data, aes(x = x, y = y, fill = value)) +
+  geom_bar(stat = "identity", width = 10) +  # Use stat = "identity" to plot the actual values
+  scale_fill_gradient(low = "blue", high = "yellow", name = "Gradient") +  # Define the gradient colors
+  labs(title = "Gradient Scale from Blue to Yellow",
+       x = NULL,  # Remove x-axis label
+       y = NULL) +  # Remove y-axis label
+  theme_minimal()  # Apply a minimal theme
+
+#Map cell type to XY
+x <- Subset$centroid_x
+y <- Subset$centroid_y
+CLU <- subset(Subset, Type_sup_all == "Oligodendrocyte precursor cells")
+x_CLU = CLU$centroid_x
+y_CLU = CLU$centroid_y
+df.xy = data.frame(x = x, y = y)
+df.xy.cl = data.frame(x = x_CLU, y = y_CLU)
+ggplot() +
+  geom_point(data = df.xy, aes(x = x, y = y), color = "grey", size = 0.1) +
+  geom_point(data = df.xy.cl, aes(x = x, y = y), color = "blue", size = 0.1)
+
+#Plot each class in XY FOR LOOP for all celltypes 
+unique_class_names <- unique(Subset$Type_sup_all)
+x <- Subset$centroid_x
+y <- Subset$centroid_y
+
+# Loop through unique class names
+for (class in unique_class_names) {
+  # Subset data for the current class name
+  CLU <- subset(Subset, subset = Type_sup_all == class) 
+  
+  # Extract x and y coordinates for the current class
+  x_CLU <- CLU$centroid_x
+  y_CLU <- CLU$centroid_y
+  
+  # Create data frames for plotting
+  df.xy <- data.frame(x = Subset$centroid_x, y = Subset$centroid_y)
+  df.xy.cl <- data.frame(x = x_CLU, y = y_CLU)
+  
+  # Create the plot
+  plot <- ggplot() +
+    geom_point(data = df.xy, aes(x = x, y = y), color = "grey", size = 0.1) +     
+    geom_point(data = df.xy.cl, aes(x = x, y = y), color = "blue", size = 0.1) +
+    ggtitle(paste("Class:", class))  # Add title with class name
+  
+  # Save the plot as PDF
+  pdf_file <- paste("plot_", class, ".pdf", sep = "")
+  ggsave(pdf_file, plot, width = 8, height = 6)
+}
+
+# Plot the cell types in XY with a legend 
+cols <- InSituType::colorCellTypes(freqs = table(sup$clust), palette = "brewers")
+par(mfrow = c(1, 1))
+par(mar = c(3, 0, 3, 3))
+p <- plot(Subset$centroid_x, Subset$centroid_y, pch = 16, cex = .6, asp = 1, cex.main = 0.75,
+          main = "cells in physical space",
+     col = cols[sup$clust], xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+```
+
+# Polygons
+# Polygons using Proseg data
+Proseg polygons are put out in a different format than Nanostring, and are also layer based. You can take the 2D representation and use this, or take one of the layers specifically. For now, cell numbers don't correspond to fovs (proseg development), but are random. 
+```{r Polygons proseg, eval = FALSE}
+polygons <- st_read("cell-polygons.geojson")
+st_crs(polygons) <- NA
+
+filtered_polygons <- subset(polygons, cell %in% cells)
+filtered_transcripts <- subset(transcript_metadata, fov == 139)
+
+#This tells the package that there are no 'coordinate systems' associated with the polygons, otherwise you will be plotting latitudes 
+# Plot using ggplot2 with Cartesian coordinates
+ggplot() +
+  geom_sf(data = filtered_polygons) +
+  geom_point(data = filtered_transcripts, aes(x = x, y = y), size = 0.001) +
+  theme_minimal() +
+  labs(title = "Plot of Filtered Polygons in Pixel Space")
+```
+
+## Workaround Proseg data cells per FOV
+Currently the cell numbers of proseg differ per FOV and are not in order. Make a list of lists where each FOV is mentioned
+```{r Cells per fov, eval = FALSE}
+cells_by_fov <- split(cell_metadata$cell, cell_metadata$fov)
+#To get the cell numbers of fov 4
+# Change [] to FOV of choice 
+cells <- unlist(cells_by_fov[["243"]])
+filtered_polygons <- subset(polygons, cell %in% cells)
+filtered_transcripts <- subset(transcript_metadata, fov %in% 4)
+
+ggplot() +
+  geom_sf(data = filtered_polygons) +
+  geom_point(data = filtered_transcripts, aes(x = x, y = y, color = factor(background)), size = 0.001) +
+  scale_color_manual(values = c("1" = "#1CE482", "0" = "#1C7EE4")) +
+  theme_minimal() +
+  labs(title = "Plot of Filtered Polygons in Pixel Space")
+
+
+#If you want to color for celltypes 
+pdgfra <- FetchData(Subset, vars = "Pdgfra")
+pdgfra <- as.numeric(pdgfra)
+df <- data.frame(cell = as.character(Subset$cell), Type_sup_all = Subset$Type_sup_all, exp = pdgfra)
+df2 <- merge(filtered_polygons, df, by = "cell")
+ggplot(data = df2) +
+  geom_sf(aes(fill = Type_sup_all)) + 
+  theme_minimal () 
+
+# Only for OPCs
+# Reorder so OPCs are plotted last (otherwise they might be overlapped by other cells)
+df2 <- df2[order(df2$Type_sup_all == "Oligodendrocyte precursor cells"), ]
+
+#Plot the OPCs 
+ggplot(data = df2) +
+  geom_sf(aes(fill = ifelse(Type_sup_all == "Oligodendrocyte precursor cells", "Oligodendrocyte precursor cells", NA)), na.rm = TRUE) +
+  scale_fill_manual(values = c("Oligodendrocyte precursor cells" = "pink")) + 
+  theme_minimal() + NoLegend()
+```
